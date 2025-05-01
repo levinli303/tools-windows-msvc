@@ -1,0 +1,37 @@
+diff --git a/arc.mm b/arc.mm
+index fbba14c..a036e0a 100644
+--- a/arc.mm
++++ b/arc.mm
+@@ -78,6 +78,32 @@ static inline arc_tls_key_t arc_tls_key_create(arc_cleanup_function_t cleanupFun
+ 
+ #ifdef arc_tls_store
+ arc_tls_key_t ARCThreadKey;
++
++#if defined(_WIN32)
++_WINBOOL WINAPI DllMain(HANDLE hInst, ULONG ul_reason_for_call, LPVOID lpReserved)
++{
++    switch(ul_reason_for_call)
++    {
++    case DLL_PROCESS_ATTACH:
++        break;
++    case DLL_PROCESS_DETACH:
++        if (NULL == lpReserved && NULL != ARCThreadKey)
++        {
++            FlsFree(ARCThreadKey);
++            ARCThreadKey = NULL;
++        }
++        break;
++    case DLL_THREAD_ATTACH:
++        break;
++    case DLL_THREAD_DETACH:
++        break;
++    default:
++        break;
++    }
++    return TRUE;
++}
++#endif
++
+ #endif
+ 
+ #ifndef HAVE_BLOCK_USE_RR2
