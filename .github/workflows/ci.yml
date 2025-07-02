@@ -97,9 +97,16 @@ jobs:
       
       - name: Install Dependencies
         run: |
-          winget install --accept-source-agreements --accept-package-agreements Ninja-build.Ninja ${{ matrix.arch == 'arm64' && '--architecture arm64' || '' }}
-          winget install --accept-source-agreements --accept-package-agreements NASM
-          winget install --accept-source-agreements --accept-package-agreements LLVM.LLVM ${{ matrix.arch == 'arm64' && '--architecture arm64' || '' }}
+          call :install_with_retry "winget install --accept-source-agreements --accept-package-agreements Ninja-build.Ninja ${{ matrix.arch == 'arm64' && '--architecture arm64' || '' }}"
+          call :install_with_retry "winget install --accept-source-agreements --accept-package-agreements NASM"
+          call :install_with_retry "winget install --accept-source-agreements --accept-package-agreements LLVM.LLVM ${{ matrix.arch == 'arm64' && '--architecture arm64' || '' }}"
+          goto :eof
+
+          :install_with_retry
+          %~1
+          if %errorlevel% equ -1978335189 exit /b 0
+          if %errorlevel% neq 0 exit /b %errorlevel%
+          exit /b 0
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
