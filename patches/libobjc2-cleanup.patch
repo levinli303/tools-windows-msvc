@@ -1,83 +1,156 @@
 diff --git a/arc.mm b/arc.mm
-index fbba14c..173152b 100644
+index fbba14c..288a042 100644
 --- a/arc.mm
 +++ b/arc.mm
-@@ -46,15 +46,19 @@ extern "C" id (*_objc_weak_load)(id object);
- // Additionally, the FLS API surface is 1:1 mapped to
- // the TLS API surface when fibers are not in use.
- #	include "safewindows.h"
+@@ -40,46 +40,6 @@
+ 
+ extern "C" id (*_objc_weak_load)(id object);
+ 
+-#if defined(_WIN32)
+-// We're using the Fiber-Local Storage APIs on Windows
+-// because the TLS APIs won't pass app certification.
+-// Additionally, the FLS API surface is 1:1 mapped to
+-// the TLS API surface when fibers are not in use.
+-#	include "safewindows.h"
 -#	define arc_tls_store FlsSetValue
 -#	define arc_tls_load FlsGetValue
-+#	define arc_tls_store TlsSetValue
-+#	define arc_tls_load TlsGetValue
- #	define TLS_CALLBACK(name) void WINAPI name
- 
- typedef DWORD arc_tls_key_t;
- typedef void WINAPI(*arc_cleanup_function_t)(void*);
- static inline arc_tls_key_t arc_tls_key_create(arc_cleanup_function_t cleanupFunction)
- {
+-#	define TLS_CALLBACK(name) void WINAPI name
+-
+-typedef DWORD arc_tls_key_t;
+-typedef void WINAPI(*arc_cleanup_function_t)(void*);
+-static inline arc_tls_key_t arc_tls_key_create(arc_cleanup_function_t cleanupFunction)
+-{
 -	return FlsAlloc(cleanupFunction);
-+	// Don't register an FLS cleanup callback that points into this DLL,
-+	// because the OS may call it after the DLL is unloaded.  Instead,
-+	// register the slot without a callback and perform per-thread cleanup
-+	// from DllMain while the DLL is still loaded.
-+	return TlsAlloc();
- }
- 
- #else // if defined(_WIN32)
-@@ -77,7 +81,7 @@ static inline arc_tls_key_t arc_tls_key_create(arc_cleanup_function_t cleanupFun
- #endif
- 
- #ifdef arc_tls_store
+-}
+-
+-#else // if defined(_WIN32)
+-
+-#	ifndef NO_PTHREADS
+-#		include <pthread.h>
+-#		define arc_tls_store pthread_setspecific
+-#		define arc_tls_load pthread_getspecific
+-#		define TLS_CALLBACK(name) void name
+-
+-typedef pthread_key_t arc_tls_key_t;
+-typedef void (*arc_cleanup_function_t)(void*);
+-static inline arc_tls_key_t arc_tls_key_create(arc_cleanup_function_t cleanupFunction)
+-{
+-	pthread_key_t key;
+-	pthread_key_create(&key, cleanupFunction);
+-	return key;
+-}
+-#	endif
+-#endif
+-
+-#ifdef arc_tls_store
 -arc_tls_key_t ARCThreadKey;
-+arc_tls_key_t ARCThreadKey = (arc_tls_key_t)TLS_OUT_OF_INDEXES;
- #endif
- 
+-#endif
+-
  #ifndef HAVE_BLOCK_USE_RR2
-@@ -730,6 +734,46 @@ PRIVATE extern "C" void init_arc(void)
- #endif
+ extern "C"
+ {
+@@ -122,10 +82,44 @@ struct arc_autorelease_pool
+ 	id pool[POOL_SIZE];
+ };
+ 
++struct arc_tls;
++
++static inline void release(id obj);
++static void emptyPool(struct arc_tls *tls, void *stop);
++
+ struct arc_tls
+ {
+ 	struct arc_autorelease_pool *pool;
+ 	id returnRetained;
++
++	arc_tls()
++	{
++		pool = NULL;
++		returnRetained = nil;
++	}
++
++	void cleanup()
++	{
++		if (returnRetained)
++		{
++			release(returnRetained);
++			returnRetained = nil;
++		}
++		if (NULL != pool)
++		{
++			emptyPool(this, NULL);
++			assert(NULL == pool);
++		}
++		if (returnRetained)
++		{
++			cleanup();
++		}
++	}
++
++	~arc_tls()
++	{
++		cleanup();
++	}
+ };
+ 
+ /**
+@@ -139,19 +133,9 @@ static inline T* new_zeroed()
+ 
+ static inline struct arc_tls* getARCThreadData(void)
+ {
+-#ifndef arc_tls_store
+-	return NULL;
+-#else // !defined arc_tls_store
+-	auto tls = static_cast<struct arc_tls*>(arc_tls_load(ARCThreadKey));
+-	if (NULL == tls)
+-	{
+-		tls = new_zeroed<struct arc_tls>();
+-		arc_tls_store(ARCThreadKey, tls);
+-	}
+-	return tls;
+-#endif
++	thread_local struct arc_tls tls;
++	return &tls;
+ }
+-static inline void release(id obj);
+ 
+ /**
+  * Empties objects from the autorelease pool, stating at the head of the list
+@@ -208,27 +192,6 @@ static void emptyPool(struct arc_tls *tls, void *stop)
+ 	//fprintf(stderr, "New insert: %p.  Stop: %p\n", tls->pool->insert, stop);
  }
  
-+#if defined(_WIN32)
-+// Ensure we free the Fls index during DLL_PROCESS_DETACH so the OS won't
-+// attempt to call back into this DLL after it has been unloaded.  This
-+// prevents crashes when the Fls cleanup callback points into the DLL.
-+extern "C" BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
-+{
-+	switch (reason)
-+	{
-+    // When threads exit (DLL_THREAD_DETACH) or the process is detaching
-+    // (DLL_PROCESS_DETACH), run our cleanup for the current thread while
-+    // the DLL is still loaded.  We avoid registering an FLS callback and
-+    // instead perform the cleanup here to guarantee the code is present.
-+	case DLL_THREAD_DETACH:
-+	case DLL_PROCESS_DETACH:
-+		if (ARCThreadKey != (arc_tls_key_t)TLS_OUT_OF_INDEXES)
-+		{
-+			void *val = TlsGetValue(ARCThreadKey);
-+			if (val)
-+			{
-+				// Clear the slot and run our cleanup on the thread's data.
-+				TlsSetValue(ARCThreadKey, NULL);
-+				cleanupPools(static_cast<struct arc_tls*>(val));
-+			}
-+		}
-+		if (reason == DLL_PROCESS_DETACH)
-+		{
-+			if (ARCThreadKey != (arc_tls_key_t)TLS_OUT_OF_INDEXES)
-+			{
-+				TlsFree(ARCThreadKey);
-+				ARCThreadKey = (arc_tls_key_t)TLS_OUT_OF_INDEXES;
-+			}
-+		}
-+		break;
-+	default:
-+		break;
-+	}
-+	return TRUE;
-+}
-+#endif
-+
- /**
-   * Load from a weak pointer and return whether this really was a weak
-   * reference or a strong (not deallocatable) object in a weak pointer.  The
+-#ifdef arc_tls_store
+-static TLS_CALLBACK(cleanupPools)(struct arc_tls* tls)
+-{
+-	if (tls->returnRetained)
+-	{
+-		release(tls->returnRetained);
+-		tls->returnRetained = nil;
+-	}
+-	if (NULL != tls->pool)
+-	{
+-		emptyPool(tls, NULL);
+-		assert(NULL == tls->pool);
+-	}
+-	if (tls->returnRetained)
+-	{
+-		cleanupPools(tls);
+-	}
+-	free(tls);
+-}
+-#endif
+-
+ 
+ static Class AutoreleasePool;
+ static IMP NewAutoreleasePool;
+@@ -722,9 +685,6 @@ static const struct Block_callbacks_RR blocks_runtime_callbacks = {
+ PRIVATE extern "C" void init_arc(void)
+ {
+ 	INIT_LOCK(weakRefLock);
+-#ifdef arc_tls_store
+-	ARCThreadKey = arc_tls_key_create((arc_cleanup_function_t)cleanupPools);
+-#endif
+ #ifdef HAVE_BLOCK_USE_RR2
+ 	_Block_use_RR2(&blocks_runtime_callbacks);
+ #endif
